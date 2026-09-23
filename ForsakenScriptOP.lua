@@ -12,6 +12,7 @@ local allConnections = {}
 
 -- ==================== SPRINTING MODULE (Stamina) ====================
 local Sprinting = nil
+local sprintOriginal = nil
 local function tryLoadSprinting()
     if Sprinting then return true end
     local ok, mod = pcall(function()
@@ -25,10 +26,20 @@ local function tryLoadSprinting()
         if not Sprint then return nil end
         return require(Sprint)
     end)
-    if ok and mod then Sprinting = mod return true end
+    if ok and mod then
+        Sprinting = mod
+        pcall(function()
+            sprintOriginal = {
+                MaxStamina = Sprinting.MaxStamina,
+                StaminaGain = Sprinting.StaminaGain,
+                StaminaLoss = Sprinting.StaminaLoss,
+                StaminaLossDisabled = Sprinting.StaminaLossDisabled,
+            }
+        end)
+        return true
+    end
     return false
 end
-tryLoadSprinting()
 
 -- ==================== KILLER ATTACK ANIMATION IDS ====================
 local ATTACK_ANIM_IDS = {
@@ -108,12 +119,46 @@ local function getGeneratorPosition(gen)
     return anyPart and anyPart.Position or nil
 end
 
-local function getMapIngameFolder()
+local function isGeneratorModel(inst)
+    if not inst or not inst:IsA("Model") then return false end
+    local progress = inst:FindFirstChild("Progress", true)
+    if not progress or not progress:IsA("NumberValue") then return false end
+    return true
+end
+
+local function collectGenerators(root, out, depth)
+    out = out or {}
+    depth = depth or 0
+    if not root or depth > 8 then return out end
+    for _, child in ipairs(root:GetChildren()) do
+        if isGeneratorModel(child) then
+            table.insert(out, child)
+        elseif child:IsA("Folder") or child:IsA("Model") then
+            if child.Name ~= "Players" and child.Name ~= "Hitboxes" and child.Name ~= "Effects" then
+                collectGenerators(child, out, depth + 1)
+            end
+        end
+    end
+    return out
+end
+
+local function getMapFolder()
     local map = Workspace:FindFirstChild("Map")
-    if not map then return nil end
-    local ingame = map:FindFirstChild("Ingame")
-    if not ingame then return nil end
-    return ingame:FindFirstChild("Map")
+    if map then
+        local ingame = map:FindFirstChild("Ingame")
+        if ingame then
+            local inner = ingame:FindFirstChild("Map")
+            if inner then return inner end
+            return ingame
+        end
+        local inner = map:FindFirstChild("Map")
+        if inner then return inner end
+        return map
+    end
+    for _, c in ipairs(Workspace:GetChildren()) do
+        if c.Name == "Map" and (c:IsA("Folder") or c:IsA("Model")) then return c end
+    end
+    return nil
 end
 
 local function findNearestGenerator()
@@ -121,16 +166,17 @@ local function findNearestGenerator()
     if not lp or not lp.Character then return nil, math.huge end
     local root = lp.Character:FindFirstChild("HumanoidRootPart")
     if not root then return nil, math.huge end
-    local mapFolder = getMapIngameFolder()
+
+    local mapFolder = getMapFolder()
     if not mapFolder then return nil, math.huge end
+
+    local gens = collectGenerators(mapFolder)
     local best, bd = nil, math.huge
-    for _, gen in ipairs(mapFolder:GetChildren()) do
-        if gen:IsA("Model") and gen:FindFirstChild("Progress") then
-            local genPos = getGeneratorPosition(gen)
-            if genPos then
-                local d = (genPos - root.Position).Magnitude
-                if d < bd then bd = d best = gen end
-            end
+    for _, gen in ipairs(gens) do
+        local genPos = getGeneratorPosition(gen)
+        if genPos then
+            local d = (genPos - root.Position).Magnitude
+            if d < bd then bd = d best = gen end
         end
     end
     return best, bd
@@ -140,13 +186,19 @@ end
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "ForsakenHub"
 screenGui.ResetOnSpawn = false
+-- Deixa o GUI por cima de TODOS os outros GUIs do jogo (HUD, AbilityContainer, etc.)
+screenGui.DisplayOrder = 2147483647          -- valor máximo possível (2^31-1)
+screenGui.IgnoreGuiInset = true              -- cobre também a área do topbar do Roblox
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = player:WaitForChild("PlayerGui")
 
 local openButton = Instance.new("ImageLabel", screenGui)
+openButton.Name = "ForsakenOpenButton"
 openButton.Size = UDim2.new(0, 60, 0, 60)
 openButton.Position = UDim2.new(0, 20, 0, 20)
 openButton.BackgroundTransparency = 1
 openButton.Image = "rbxassetid://72721797847451"
+openButton.ZIndex = 2147483647               -- fica acima de tudo dentro deste ScreenGui
 Instance.new("UICorner", openButton).CornerRadius = UDim.new(0, 30)
 local uiStroke = Instance.new("UIStroke", openButton)
 uiStroke.Thickness = 2
@@ -184,11 +236,13 @@ table.insert(allConnections, RunService.RenderStepped:Connect(function()
 end))
 
 local mainFrame = Instance.new("Frame", screenGui)
+mainFrame.Name = "ForsakenMainFrame"
 mainFrame.Size = UDim2.new(0, 500, 0, 300)
 mainFrame.Position = UDim2.new(0.5, -250, 0.5, -150)
 mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 mainFrame.BorderSizePixel = 0
 mainFrame.Visible = false
+mainFrame.ZIndex = 2147483646                -- logo abaixo do openButton, acima de tudo mais
 Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 15)
 local mainFrameStroke = Instance.new("UIStroke", mainFrame)
 mainFrameStroke.Thickness = 2
@@ -542,7 +596,7 @@ restoreCursorInfo.Text = "Hides crosshair frames and restores\nthe mouse cursor 
 restoreCursorInfo.TextXAlignment = Enum.TextXAlignment.Left
 restoreCursorInfo.TextWrapped = true
 
--- ==================== ESP SYSTEM (event-based, no per-frame scanning) ====================
+-- ==================== ESP SYSTEM ====================
 local ESP = {
     Players    = { Enabled = false, Fill = 0.4, Border = 0, HasBorder = false, Color = Color3.fromRGB(0, 150, 255) },
     Killers    = { Enabled = false, Fill = 0.4, Border = 0, HasBorder = true,  Color = Color3.fromRGB(255, 0, 0) },
@@ -692,21 +746,21 @@ local function getGeneratorHighlightTarget(gen)
 end
 
 local function genIsComplete(gen)
-    local progress = gen:FindFirstChild("Progress")
-    if not progress or not progress:IsA("NumberValue") then return true end
-    if progress.Value >= 100 then return true end
+    local progress = gen:FindFirstChild("Progress", true)
+    if progress and progress:IsA("NumberValue") then
+        if progress.Value >= 100 then return true end
+    end
     local completed = gen:GetAttribute("cl_Completed")
     return completed ~= nil and completed >= 5
 end
 
 local function trackGenerator(gen)
-    if not gen:IsA("Model") then return end
+    if not gen or not gen:IsA("Model") then return end
     if genIsComplete(gen) then return end
     local target = getGeneratorHighlightTarget(gen)
     esp_add("Generators", target)
 
-    -- Watch the Progress NumberValue to auto-remove when complete
-    local progress = gen:FindFirstChild("Progress")
+    local progress = gen:FindFirstChild("Progress", true)
     if progress and progress:IsA("NumberValue") then
         table.insert(espConnections.Generators, progress:GetPropertyChangedSignal("Value"):Connect(function()
             if not ESP.Generators.Enabled then return end
@@ -720,22 +774,39 @@ local function trackGenerator(gen)
 end
 
 local function startGeneratorsESP()
-    local mapFolder = getMapIngameFolder()
-    if not mapFolder then return false end
-
-    for _, gen in ipairs(mapFolder:GetChildren()) do
-        trackGenerator(gen)
+    local mapFolder = getMapFolder()
+    if not mapFolder then
+        task.spawn(function()
+            for _ = 1, 10 do
+                task.wait(1)
+                if not ESP.Generators.Enabled then return end
+                local mf = getMapFolder()
+                if mf then
+                    local gens = collectGenerators(mf)
+                    for _, g in ipairs(gens) do trackGenerator(g) end
+                    return
+                end
+            end
+        end)
+    else
+        local gens = collectGenerators(mapFolder)
+        for _, gen in ipairs(gens) do
+            trackGenerator(gen)
+        end
     end
 
-    table.insert(espConnections.Generators, mapFolder.ChildAdded:Connect(function(gen)
+    table.insert(espConnections.Generators, Workspace.DescendantAdded:Connect(function(d)
         if not ESP.Generators.Enabled then return end
-        task.wait(0.1)
-        if not ESP.Generators.Enabled then return end
-        trackGenerator(gen)
+        if not d:IsA("Model") then return end
+        if isGeneratorModel(d) then
+            task.wait(0.1)
+            if ESP.Generators.Enabled then trackGenerator(d) end
+        end
     end))
 
-    table.insert(espConnections.Generators, mapFolder.ChildRemoved:Connect(function(gen)
-        local target = getGeneratorHighlightTarget(gen)
+    table.insert(espConnections.Generators, Workspace.DescendantRemoving:Connect(function(d)
+        if not d:IsA("Model") then return end
+        local target = getGeneratorHighlightTarget(d)
         esp_remove("Generators", target)
     end))
 
@@ -749,7 +820,6 @@ end
 
 -- --- Item ESP ---
 local function startItemsESP()
-    -- Initial scan
     local function scan(parent)
         for _, c in ipairs(parent:GetChildren()) do
             if isESPItem(c) then
@@ -763,6 +833,7 @@ local function startItemsESP()
 
     table.insert(espConnections.Items, Workspace.DescendantAdded:Connect(function(d)
         if not ESP.Items.Enabled then return end
+        if not (d:IsA("Model") or d:IsA("Tool")) then return end
         if isESPItem(d) then esp_add("Items", d) end
     end))
 
@@ -778,7 +849,6 @@ local function stopItemsESP()
     esp_clearCategory("Items")
 end
 
--- Slow health check (0.5s) - cheap, only iterates existing highlights
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -832,7 +902,6 @@ local function espToggle(text, initial, onClick)
     return b
 end
 
--- Items
 espSectionTitle("Item ESP (Green)")
 espToggle("Items ESP", ESP.Items.Enabled, function(v)
     ESP.Items.Enabled = v
@@ -853,7 +922,6 @@ createSlider(espFrame, ey, 0, 1, ESP.Items.Border, "Items Border Transparency", 
 end)
 ey = ey + 60
 
--- Players
 espSectionTitle("Player ESP (Blue)")
 espToggle("Players ESP", ESP.Players.Enabled, function(v)
     ESP.Players.Enabled = v
@@ -874,7 +942,6 @@ createSlider(espFrame, ey, 0, 1, ESP.Players.Border, "Players Border Transparenc
 end)
 ey = ey + 60
 
--- Killers
 espSectionTitle("Killer ESP (Red)")
 espToggle("Killers ESP", ESP.Killers.Enabled, function(v)
     ESP.Killers.Enabled = v
@@ -895,7 +962,6 @@ createSlider(espFrame, ey, 0, 1, ESP.Killers.Border, "Killers Border Transparenc
 end)
 ey = ey + 60
 
--- Generators
 espSectionTitle("Generator ESP (Yellow)")
 espToggle("Generators ESP", ESP.Generators.Enabled, function(v)
     ESP.Generators.Enabled = v
@@ -922,9 +988,11 @@ local PS = {
     StaminaGain = 20,
     StaminaLoss = 10,
     InfiniteStamina = false,
+    EnableEdit = false,
 }
 
 local function pushToSprinting()
+    if not PS.EnableEdit then return end
     if not Sprinting then tryLoadSprinting() end
     if not Sprinting then return end
     pcall(function()
@@ -941,18 +1009,21 @@ local function pushToSprinting()
 end
 
 table.insert(allConnections, RunService.Heartbeat:Connect(function()
+    if not PS.EnableEdit then return end
     if not Sprinting then return end
-    if Sprinting.MaxStamina ~= PS.MaxStamina then Sprinting.MaxStamina = PS.MaxStamina end
-    if Sprinting.StaminaGain ~= PS.StaminaGain then Sprinting.StaminaGain = PS.StaminaGain end
-    if Sprinting.StaminaLoss ~= PS.StaminaLoss then Sprinting.StaminaLoss = PS.StaminaLoss end
-    if PS.InfiniteStamina then
-        Sprinting.StaminaLossDisabled = true
-        Sprinting.Stamina = PS.MaxStamina
-    else
-        if Sprinting.StaminaLossDisabled == true and not PS.InfiniteStamina then
-            Sprinting.StaminaLossDisabled = false
+    pcall(function()
+        if Sprinting.MaxStamina ~= PS.MaxStamina then Sprinting.MaxStamina = PS.MaxStamina end
+        if Sprinting.StaminaGain ~= PS.StaminaGain then Sprinting.StaminaGain = PS.StaminaGain end
+        if Sprinting.StaminaLoss ~= PS.StaminaLoss then Sprinting.StaminaLoss = PS.StaminaLoss end
+        if PS.InfiniteStamina then
+            Sprinting.StaminaLossDisabled = true
+            Sprinting.Stamina = PS.MaxStamina
+        else
+            if Sprinting.StaminaLossDisabled == true then
+                Sprinting.StaminaLossDisabled = false
+            end
         end
-    end
+    end)
 end))
 
 local playerTitle = Instance.new("TextLabel", playerFrame)
@@ -969,28 +1040,62 @@ local playerStatus = Instance.new("TextLabel", playerFrame)
 playerStatus.Size = UDim2.new(0, 290, 0, 20)
 playerStatus.Position = UDim2.new(0, 15, 0, 36)
 playerStatus.BackgroundTransparency = 1
-playerStatus.Text = Sprinting and "Sprinting module: loaded" or "Sprinting module: not found"
-playerStatus.TextColor3 = Sprinting and Color3.fromRGB(120, 255, 120) or Color3.fromRGB(255, 100, 100)
+playerStatus.Text = "Sprinting module: not loaded (click Enable Edit)"
+playerStatus.TextColor3 = Color3.fromRGB(255, 200, 120)
 playerStatus.Font = Enum.Font.Code
 playerStatus.TextSize = 11
 playerStatus.TextXAlignment = Enum.TextXAlignment.Left
 
-createSlider(playerFrame, 65, 100, 1000, PS.MaxStamina, "Max Stamina", function(v)
+local enableEditBtn = Instance.new("TextButton", playerFrame)
+enableEditBtn.Size = UDim2.new(0, 290, 0, 34)
+enableEditBtn.Position = UDim2.new(0, 15, 0, 60)
+enableEditBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+enableEditBtn.TextColor3 = Color3.new(1, 1, 1)
+enableEditBtn.Font = Enum.Font.SourceSansBold
+enableEditBtn.TextSize = 13
+enableEditBtn.Text = "Enable Stamina Edit: OFF"
+Instance.new("UICorner", enableEditBtn).CornerRadius = UDim.new(0, 8)
+enableEditBtn.MouseButton1Click:Connect(function()
+    PS.EnableEdit = not PS.EnableEdit
+    enableEditBtn.Text = PS.EnableEdit and "Enable Stamina Edit: ON" or "Enable Stamina Edit: OFF"
+    enableEditBtn.BackgroundColor3 = PS.EnableEdit and Color3.fromRGB(0, 120, 0) or Color3.fromRGB(60, 60, 60)
+    if PS.EnableEdit then
+        if tryLoadSprinting() then
+            playerStatus.Text = "Sprinting module: loaded"
+            playerStatus.TextColor3 = Color3.fromRGB(120, 255, 120)
+            pushToSprinting()
+        else
+            playerStatus.Text = "Sprinting module: not found"
+            playerStatus.TextColor3 = Color3.fromRGB(255, 100, 100)
+        end
+    else
+        if Sprinting and sprintOriginal then
+            pcall(function()
+                if sprintOriginal.MaxStamina ~= nil then Sprinting.MaxStamina = sprintOriginal.MaxStamina end
+                if sprintOriginal.StaminaGain ~= nil then Sprinting.StaminaGain = sprintOriginal.StaminaGain end
+                if sprintOriginal.StaminaLoss ~= nil then Sprinting.StaminaLoss = sprintOriginal.StaminaLoss end
+                if sprintOriginal.StaminaLossDisabled ~= nil then Sprinting.StaminaLossDisabled = sprintOriginal.StaminaLossDisabled end
+            end)
+        end
+    end
+end)
+
+createSlider(playerFrame, 105, 100, 1000, PS.MaxStamina, "Max Stamina", function(v)
     PS.MaxStamina = v
     pushToSprinting()
 end)
-createSlider(playerFrame, 118, 1, 200, PS.StaminaGain, "Stamina Gain", function(v)
+createSlider(playerFrame, 158, 1, 200, PS.StaminaGain, "Stamina Gain", function(v)
     PS.StaminaGain = v
     pushToSprinting()
 end)
-createSlider(playerFrame, 171, 0, 100, PS.StaminaLoss, "Stamina Loss", function(v)
+createSlider(playerFrame, 211, 0, 100, PS.StaminaLoss, "Stamina Loss", function(v)
     PS.StaminaLoss = v
     pushToSprinting()
 end)
 
 local infiniteBtn = Instance.new("TextButton", playerFrame)
 infiniteBtn.Size = UDim2.new(0, 290, 0, 34)
-infiniteBtn.Position = UDim2.new(0, 15, 0, 228)
+infiniteBtn.Position = UDim2.new(0, 15, 0, 268)
 infiniteBtn.BackgroundColor3 = PS.InfiniteStamina and Color3.fromRGB(0, 120, 0) or Color3.fromRGB(60, 60, 60)
 infiniteBtn.TextColor3 = Color3.new(1, 1, 1)
 infiniteBtn.Font = Enum.Font.SourceSansBold
@@ -1006,7 +1111,7 @@ end)
 
 local currentStaminaLabel = Instance.new("TextLabel", playerFrame)
 currentStaminaLabel.Size = UDim2.new(0, 290, 0, 20)
-currentStaminaLabel.Position = UDim2.new(0, 15, 0, 270)
+currentStaminaLabel.Position = UDim2.new(0, 15, 0, 310)
 currentStaminaLabel.BackgroundTransparency = 1
 currentStaminaLabel.Text = "Current: --"
 currentStaminaLabel.TextColor3 = Color3.fromRGB(180, 220, 255)
@@ -1051,7 +1156,7 @@ local function fireGeneratorRemote()
     local gen, dist = findNearestGenerator()
     if not gen then return false, "No generator found" end
     if dist > GEN.MaxDistance then return false, string.format("Too far (%.1f > %.1f)", dist, GEN.MaxDistance) end
-    local remotes = gen:FindFirstChild("Remotes")
+    local remotes = gen:FindFirstChild("Remotes", true)
     if not remotes then return false, "No Remotes folder" end
     local remoteEvent = remotes:FindFirstChildOfClass("RemoteEvent")
     if not remoteEvent then return false, "No RemoteEvent" end
@@ -1102,6 +1207,61 @@ plusOneBtn.MouseButton1Click:Connect(function()
     if ok then genStatusLabel.Text = "  +1 Level: " .. msg
     else genStatusLabel.Text = "  Failed: " .. msg end
 end)
+
+-- ==================== KEYBIND DOS GERADORES ====================
+local GEN_KEYBIND = {
+    Selected = nil,
+    IsMouse = false,
+    Listening = false,
+}
+
+local genKeybindBtn
+
+local function getKeybindDisplay()
+    if not GEN_KEYBIND.Selected then return "None" end
+    if GEN_KEYBIND.IsMouse then
+        return (tostring(GEN_KEYBIND.Selected):gsub("Enum.UserInputType.", ""))
+    else
+        return GEN_KEYBIND.Selected.Name
+    end
+end
+
+local function matchesKeybind(input)
+    if not GEN_KEYBIND.Selected then return false end
+    if GEN_KEYBIND.IsMouse then
+        return input.UserInputType == GEN_KEYBIND.Selected
+    else
+        return input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == GEN_KEYBIND.Selected
+    end
+end
+
+genKeybindBtn = Instance.new("TextButton", generatorsFrame)
+genKeybindBtn.Size = UDim2.new(0, 290, 0, 34)
+genKeybindBtn.Position = UDim2.new(0, 15, 0, gy)
+genKeybindBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+genKeybindBtn.TextColor3 = Color3.new(1, 1, 1)
+genKeybindBtn.Font = Enum.Font.SourceSansBold
+genKeybindBtn.TextSize = 13
+genKeybindBtn.Text = "Trigger Key: None (click to set)"
+Instance.new("UICorner", genKeybindBtn).CornerRadius = UDim.new(0, 8)
+gy = gy + 44
+
+genKeybindBtn.MouseButton1Click:Connect(function()
+    GEN_KEYBIND.Listening = true
+    genKeybindBtn.Text = "Press a key or mouse button..."
+    genKeybindBtn.BackgroundColor3 = Color3.fromRGB(180, 130, 0)
+end)
+
+local genKeybindHint = Instance.new("TextLabel", generatorsFrame)
+genKeybindHint.Size = UDim2.new(0, 290, 0, 20)
+genKeybindHint.Position = UDim2.new(0, 15, 0, gy)
+genKeybindHint.BackgroundTransparency = 1
+genKeybindHint.Text = "Press Esc while selecting to clear."
+genKeybindHint.TextColor3 = Color3.fromRGB(140, 140, 140)
+genKeybindHint.Font = Enum.Font.SourceSans
+genKeybindHint.TextSize = 11
+genKeybindHint.TextXAlignment = Enum.TextXAlignment.Left
+gy = gy + 26
 
 local autoBtn = Instance.new("TextButton", generatorsFrame)
 autoBtn.Size = UDim2.new(0, 290, 0, 34)
@@ -1159,27 +1319,90 @@ end)
 gy = gy + 60
 
 local genInfoLabel = Instance.new("TextLabel", generatorsFrame)
-genInfoLabel.Size = UDim2.new(0, 380, 0, 110)
+genInfoLabel.Size = UDim2.new(0, 380, 0, 140)
 genInfoLabel.Position = UDim2.new(0, 15, 0, gy)
 genInfoLabel.BackgroundTransparency = 1
 genInfoLabel.Text = [[ℹ️ +1 Level dispara o RemoteEvent
-do gerador mais próximo — o mesmo que o
-jogo faz quando você completa um puzzle.
+do gerador mais próximo.
 
 Só funciona se você estiver DENTRO do
 Max Distance configurado (padrão 15).
 
-O som toca a cada disparo.]]
+O som toca a cada disparo.
+
+Trigger Key: clique na caixa acima e
+pressione qualquer tecla OU botão do
+mouse. Depois é só apertar para usar
+o gerador automaticamente.]]
 genInfoLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
 genInfoLabel.Font = Enum.Font.SourceSans
 genInfoLabel.TextSize = 11
 genInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
 genInfoLabel.TextWrapped = true
 
-table.insert(allConnections, RunService.Heartbeat:Connect(function()
-    local gen, dist = findNearestGenerator()
+-- ============================================================
+-- CACHE DE GERADORES: evita varredura recursiva em todo o mapa
+-- a cada frame. Re-escaneia no máximo 1x/seg e status 2x/seg.
+-- ============================================================
+local genCache = { list = {}, mapFolder = nil, lastScan = 0 }
+local GEN_SCAN_INTERVAL   = 1.0
+local GEN_STATUS_INTERVAL = 0.5
+
+local function refreshGenCache()
+    local now = os.clock()
+    if now - genCache.lastScan < GEN_SCAN_INTERVAL then return end
+    genCache.lastScan = now
+
+    local mf = getMapFolder()
+    if mf ~= genCache.mapFolder then
+        genCache.mapFolder = mf
+        genCache.list = mf and collectGenerators(mf) or {}
+        return
+    end
+    if not mf then
+        genCache.list = {}
+        return
+    end
+
+    local valid = {}
+    for _, g in ipairs(genCache.list) do
+        if g.Parent then table.insert(valid, g) end
+    end
+    if #valid ~= #genCache.list then
+        genCache.list = collectGenerators(mf)
+    else
+        genCache.list = valid
+    end
+end
+
+local function getNearestGeneratorCached()
+    local lp = Players.LocalPlayer or player
+    if not lp or not lp.Character then return nil, math.huge end
+    local root = lp.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return nil, math.huge end
+
+    refreshGenCache()
+
+    local best, bd = nil, math.huge
+    for _, gen in ipairs(genCache.list) do
+        local gp = getGeneratorPosition(gen)
+        if gp then
+            local d = (gp - root.Position).Magnitude
+            if d < bd then bd = d best = gen end
+        end
+    end
+    return best, bd
+end
+
+local genStatusAccum = 0
+table.insert(allConnections, RunService.Heartbeat:Connect(function(dt)
+    genStatusAccum = genStatusAccum + dt
+    if genStatusAccum < GEN_STATUS_INTERVAL then return end
+    genStatusAccum = 0
+
+    local gen, dist = getNearestGeneratorCached()
     if gen then
-        local progress = gen:FindFirstChild("Progress")
+        local progress = gen:FindFirstChild("Progress", true)
         local pVal = progress and progress.Value or -1
         local completed = gen:GetAttribute("cl_Completed") or 0
         local inRange = dist <= GEN.MaxDistance
@@ -1191,6 +1414,41 @@ table.insert(allConnections, RunService.Heartbeat:Connect(function()
     else
         genStatusLabel.Text = "  No generator found"
         genStatusLabel.TextColor3 = Color3.fromRGB(255, 180, 180)
+    end
+end))
+
+-- ==================== LISTENER DA TECLA DOS GERADORES ====================
+table.insert(allConnections, UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if GEN_KEYBIND.Listening then
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            if input.KeyCode == Enum.KeyCode.Escape then
+                GEN_KEYBIND.Selected = nil
+                GEN_KEYBIND.IsMouse = false
+            else
+                GEN_KEYBIND.Selected = input.KeyCode
+                GEN_KEYBIND.IsMouse = false
+            end
+        elseif input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.MouseButton2
+            or input.UserInputType == Enum.UserInputType.MouseButton3 then
+            GEN_KEYBIND.Selected = input.UserInputType
+            GEN_KEYBIND.IsMouse = true
+        else
+            return
+        end
+        GEN_KEYBIND.Listening = false
+        genKeybindBtn.Text = "Trigger Key: " .. getKeybindDisplay() .. " (click to change)"
+        genKeybindBtn.BackgroundColor3 = GEN_KEYBIND.Selected and Color3.fromRGB(0, 100, 60) or Color3.fromRGB(60, 60, 60)
+        return
+    end
+
+    if isSelectingKey then return end
+
+    if matchesKeybind(input) then
+        local ok, msg = fireGeneratorRemote()
+        if ok then genStatusLabel.Text = "  Keybind +1: " .. msg
+        else genStatusLabel.Text = "  Keybind fail: " .. msg end
     end
 end))
 
@@ -1284,29 +1542,54 @@ end
 local function isBlockOnCooldown() return isButtonOnCooldown(getBlockButton()) end
 local function isPunchOnCooldown() return isButtonOnCooldown(getPunchButton()) end
 
-local controlsRef = nil
-local function getPlayerControls()
-    if controlsRef then return controlsRef end
-    local lp = getLocalPlayer()
-    if not lp then return nil end
-    local ps = lp:FindFirstChild("PlayerScripts")
-    if not ps then return nil end
-    local pm = ps:FindFirstChild("PlayerModule")
-    if not pm then return nil end
-    local ok, module = pcall(function() return require(pm) end)
-    if not ok or not module then return nil end
-    local ok2, controls = pcall(function() return module:GetControls() end)
-    if ok2 and controls then controlsRef = controls return controls end
-    return nil
+-- NÃO usamos PlayerModule:GetControls() porque require(PlayerModule)
+-- cria uma NOVA instância do módulo de câmera/controle, o que reseta
+-- a sensibilidade do mouse. Em vez disso travamos via Humanoid.AutoRotate.
+local autoRotateHolders = 0
+local autoRotateOriginal = true
+local autoRotateCharacter = nil
+
+local function acquireAutoRotate(character)
+    if not character then return end
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    if autoRotateHolders == 0 then
+        autoRotateOriginal = hum.AutoRotate
+        autoRotateCharacter = character
+    end
+    autoRotateHolders = autoRotateHolders + 1
+    pcall(function() hum.AutoRotate = false end)
 end
-local function disablePlayerControls()
-    local c = getPlayerControls()
-    if c then pcall(function() c:Disable() end) return true end
-    return false
+
+local function releaseAutoRotate()
+    if autoRotateHolders <= 0 then return end
+    autoRotateHolders = autoRotateHolders - 1
+    if autoRotateHolders == 0 then
+        local char = autoRotateCharacter
+        autoRotateCharacter = nil
+        if char and char.Parent then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                pcall(function() hum.AutoRotate = autoRotateOriginal end)
+            end
+        end
+    end
 end
-local function enablePlayerControls()
-    local c = getPlayerControls()
-    if c then pcall(function() c:Enable() end) end
+
+local function forceResetAutoRotate()
+    autoRotateHolders = 0
+    if autoRotateCharacter and autoRotateCharacter.Parent then
+        local hum = autoRotateCharacter:FindFirstChildOfClass("Humanoid")
+        if hum then pcall(function() hum.AutoRotate = autoRotateOriginal end) end
+    end
+    autoRotateCharacter = nil
+end
+
+local UserGameSettings = nil
+pcall(function() UserGameSettings = UserSettings():GetService("UserGameSettings") end)
+local savedSensitivity = nil
+if UserGameSettings then
+    pcall(function() savedSensitivity = UserGameSettings.MouseSensitivity end)
 end
 
 local function clickButton(button)
@@ -1358,7 +1641,7 @@ local function startAutoApproach(killer, guestChar, hum, anchor)
     autoApproach.OriginalSpeed = hum.WalkSpeed
     autoApproach.StartTime = os.clock()
     hum.WalkSpeed = HB.AutoApproachSpeed
-    disablePlayerControls()
+    acquireAutoRotate(guestChar)
     autoApproach.Conn = RunService.Heartbeat:Connect(function(dt)
         if not autoApproach.Active then return end
         if not HB.Enabled then stopAutoApproach() return end
@@ -1381,7 +1664,7 @@ stopAutoApproach = function()
     if not autoApproach.Active then return end
     autoApproach.Active = false
     if autoApproach.Conn then autoApproach.Conn:Disconnect() autoApproach.Conn = nil end
-    enablePlayerControls()
+    releaseAutoRotate()
     local lp = getLocalPlayer()
     if lp and lp.Character then
         local h = lp.Character:FindFirstChildOfClass("Humanoid")
@@ -1399,6 +1682,10 @@ local function startAimbot(killer)
     aimbot.Active = true
     aimbot.Killer = killer
     aimbot.EndTime = os.clock() + HB.AimbotDuration
+    do
+        local lp = getLocalPlayer()
+        if lp and lp.Character then acquireAutoRotate(lp.Character) end
+    end
     if aimbot.Conn then aimbot.Conn:Disconnect() end
     aimbot.Conn = RunService.Heartbeat:Connect(function(dt)
         if not aimbot.Active then return end
@@ -1418,6 +1705,7 @@ stopAimbot = function()
     aimbot.Active = false
     if aimbot.Conn then aimbot.Conn:Disconnect() aimbot.Conn = nil end
     aimbot.Killer = nil
+    releaseAutoRotate()
 end
 
 local function triggerAutoParry(killer)
@@ -1630,6 +1918,7 @@ task.spawn(function()
     local lp = getLocalPlayer()
     if not lp then repeat task.wait(0.1) lp = getLocalPlayer() until lp end
     table.insert(allConnections, lp.CharacterAdded:Connect(function()
+        forceResetAutoRotate()
         if HB.Enabled then
             task.wait(1)
             if HB.Enabled and isGuest1337() then
@@ -1817,6 +2106,7 @@ end)
 
 table.insert(allConnections, UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
+    if GEN_KEYBIND.Listening then return end
     if isSelectingKey and input.UserInputType == Enum.UserInputType.Keyboard then
         currentKey = input.KeyCode
         isSelectingKey = false
@@ -1844,10 +2134,27 @@ local function destroyScript()
     stopAimbot()
     stopParryMonitor()
     stopAuto()
+
+    forceResetAutoRotate()
+    if UserGameSettings and savedSensitivity ~= nil then
+        pcall(function() UserGameSettings.MouseSensitivity = savedSensitivity end)
+    end
+
+    if Sprinting and sprintOriginal then
+        pcall(function()
+            if sprintOriginal.MaxStamina ~= nil then Sprinting.MaxStamina = sprintOriginal.MaxStamina end
+            if sprintOriginal.StaminaGain ~= nil then Sprinting.StaminaGain = sprintOriginal.StaminaGain end
+            if sprintOriginal.StaminaLoss ~= nil then Sprinting.StaminaLoss = sprintOriginal.StaminaLoss end
+            if sprintOriginal.StaminaLossDisabled ~= nil then Sprinting.StaminaLossDisabled = sprintOriginal.StaminaLossDisabled end
+        end)
+    end
+    PS.EnableEdit = false
+
     for _, c in ipairs(allConnections) do if c and c.Connected then c:Disconnect() end end
     table.clear(allConnections)
     if screenGui then screenGui:Destroy() end
 end
 closeButton.MouseButton1Click:Connect(destroyScript)
 
-print("[Forsaken] Hub + ESP (optimized) + AutoBlock + Player + Generators loaded!")
+print("[Forsaken] Hub + ESP + AutoBlock + Player + Generators + Keybind loaded!")
+
